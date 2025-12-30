@@ -470,6 +470,22 @@ class Attention(nn.Module):
         if n == 1 and causal:
             causal = False
 
+        use_fa_flash = self.use_fa_flash
+        # Flash attention occasionally fails on cross-attention shapes; disable for that case to be safe
+        if has_context:
+            use_fa_flash = False
+
+        # Align KV heads with Q heads for flash attention; fall back if not divisible
+        if h != kv_h:
+            if use_fa_flash and h % kv_h == 0:
+                heads_per_kv_head = h // kv_h
+                k, v = map(lambda t: t.repeat_interleave(heads_per_kv_head, dim = 1), (k, v))
+                kv_h = h
+            else:
+                use_fa_flash = False
+
+        out = None
+
         if self.natten_kernel_size is not None:
             if natten is None:
                 raise ImportError('natten not installed, please install natten to use neighborhood attention')
@@ -487,7 +503,7 @@ class Attention(nn.Module):
             out = natten.functional.natten1dav(attn, v, kernel_size = self.natten_kernel_size, dilation=1).to(dtype_in)
 
         # Prioritize Flash Attention 2
-        elif self.use_fa_flash:
+        elif use_fa_flash:
             assert final_attn_mask is None, 'masking not yet supported for Flash Attention 2'
             # Flash Attention 2 requires FP16 inputs
             fa_dtype_in = q.dtype
